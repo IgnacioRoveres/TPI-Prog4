@@ -1,0 +1,436 @@
+### =================================================================
+### Food Store · TPI Programación 4 — Pruebas de la API con REST Client
+### Ejecutar de arriba hacia abajo. Requiere: python -m app.db.seed
+### y uvicorn app.main:app --reload. REST Client guarda la cookie
+### access_token entre peticiones.
+### =================================================================
+
+@api = http://localhost:8000/api/v1
+@clave = cliente-1234
+
+
+### -----------------------------------------------------------------
+### 1. Catálogo público (sin sesión)
+### -----------------------------------------------------------------
+
+### 200: categorías activas
+GET {{api}}/categorias
+
+### 200: productos activos paginados { total, items }
+GET {{api}}/productos?skip=0&limit=5
+
+### 200: búsqueda por nombre (sin distinguir mayúsculas) y filtro por categoría
+GET {{api}}/productos?search=PIZZA&categoria_id=2
+
+### 404: producto inexistente
+GET {{api}}/productos/9999
+
+
+### -----------------------------------------------------------------
+### 2. Registro y login de un cliente
+### -----------------------------------------------------------------
+
+### 201: registro (siempre rol user). El username cambia en cada ejecución
+# @name registro
+POST {{api}}/auth/register
+Content-Type: application/json
+
+{
+  "username": "cliente{{$timestamp}}",
+  "full_name": "Cliente de Prueba",
+  "email": "cliente{{$timestamp}}@example.com",
+  "password": "{{clave}}"
+}
+
+###
+@username = {{registro.response.body.username}}
+@clienteId = {{registro.response.body.id}}
+
+### 409: username o email ya registrados
+POST {{api}}/auth/register
+Content-Type: application/json
+
+{
+  "username": "{{username}}",
+  "full_name": "Otro",
+  "email": "otro{{$timestamp}}@example.com",
+  "password": "{{clave}}"
+}
+
+### 422: contraseña de menos de 8 caracteres
+POST {{api}}/auth/register
+Content-Type: application/json
+
+{
+  "username": "corto",
+  "full_name": "Corto",
+  "email": "corto@example.com",
+  "password": "123"
+}
+
+### 401: sin sesión
+GET {{api}}/auth/me
+
+### 401: credenciales incorrectas
+POST {{api}}/auth/token
+Content-Type: application/x-www-form-urlencoded
+
+username={{username}}&password=incorrecta
+
+### 200 { "message": "Login exitoso" } + Set-Cookie: access_token=...; HttpOnly
+POST {{api}}/auth/token
+Content-Type: application/x-www-form-urlencoded
+
+username={{username}}&password={{clave}}
+
+### 200: perfil (rol user)
+GET {{api}}/auth/me
+
+### 403: un user no puede crear categorías
+POST {{api}}/categorias
+Content-Type: application/json
+
+{
+  "nombre": "No debería crearse"
+}
+
+
+### -----------------------------------------------------------------
+### 3. Pedidos del cliente (RN-01, RN-06)
+### -----------------------------------------------------------------
+
+### Stock antes: Hamburguesa Clásica (id 1) y Papas fritas (id 12)
+GET {{api}}/productos/1
+
+### 201: pedido en PENDIENTE; descuenta stock; copia nombre y precio
+# @name pedido1
+POST {{api}}/pedidos
+Content-Type: application/json
+
+{
+  "items": [
+    { "producto_id": 1, "cantidad": 2 },
+    { "producto_id": 12, "cantidad": 1 }
+  ],
+  "forma_pago": "EFECTIVO",
+  "direccion_entrega": "Av. Siempre Viva 742, Zárate",
+  "notas": "Tocar timbre"
+}
+
+###
+@pedidoId = {{pedido1.response.body.id}}
+
+### El stock de la Hamburguesa Clásica bajó 2
+GET {{api}}/productos/1
+
+### 400: producto repetido
+POST {{api}}/pedidos
+Content-Type: application/json
+
+{
+  "items": [
+    { "producto_id": 1, "cantidad": 1 },
+    { "producto_id": 1, "cantidad": 1 }
+  ],
+  "forma_pago": "EFECTIVO",
+  "direccion_entrega": "Calle Falsa 123"
+}
+
+### 400: stock insuficiente (Aros de cebolla, id 13, tiene 3)
+POST {{api}}/pedidos
+Content-Type: application/json
+
+{
+  "items": [{ "producto_id": 13, "cantidad": 50 }],
+  "forma_pago": "TRANSFERENCIA",
+  "direccion_entrega": "Calle Falsa 123"
+}
+
+### 404 + rollback: el primer ítem es válido, el segundo no existe. No se descuenta nada
+POST {{api}}/pedidos
+Content-Type: application/json
+
+{
+  "items": [
+    { "producto_id": 1, "cantidad": 1 },
+    { "producto_id": 9999, "cantidad": 1 }
+  ],
+  "forma_pago": "EFECTIVO",
+  "direccion_entrega": "Calle Falsa 123"
+}
+
+### El stock de la Hamburguesa Clásica no cambió por el pedido fallido
+GET {{api}}/productos/1
+
+### 422: forma de pago inválida y dirección muy corta (RN-06)
+POST {{api}}/pedidos
+Content-Type: application/json
+
+{
+  "items": [{ "producto_id": 1, "cantidad": 1 }],
+  "forma_pago": "BITCOIN",
+  "direccion_entrega": "abc"
+}
+
+### 422: sin ítems
+POST {{api}}/pedidos
+Content-Type: application/json
+
+{
+  "items": [],
+  "forma_pago": "EFECTIVO",
+  "direccion_entrega": "Calle Falsa 123"
+}
+
+### 200: mis pedidos
+GET {{api}}/pedidos
+
+### 200: detalle de mi pedido
+GET {{api}}/pedidos/{{pedidoId}}
+
+### 403: el cliente no puede cambiar el estado
+PATCH {{api}}/pedidos/{{pedidoId}}/estado
+Content-Type: application/json
+
+{
+  "estado": "EN_PREPARACION"
+}
+
+### 403: el cliente no ve el resumen
+GET {{api}}/pedidos/resumen
+
+
+### -----------------------------------------------------------------
+### 4. Cancelación por el dueño con restitución de stock (RN-03, RN-04)
+### -----------------------------------------------------------------
+
+# @name pedido2
+POST {{api}}/pedidos
+Content-Type: application/json
+
+{
+  "items": [{ "producto_id": 4, "cantidad": 3 }],
+  "forma_pago": "TRANSFERENCIA",
+  "direccion_entrega": "Belgrano 1500, Zárate"
+}
+
+###
+@pedidoCancelar = {{pedido2.response.body.id}}
+
+### Stock de la Pizza Muzzarella con el pedido hecho
+GET {{api}}/productos/4
+
+### 200: cancelar en PENDIENTE
+PATCH {{api}}/pedidos/{{pedidoCancelar}}/cancelar
+
+### El stock volvió a subir 3
+GET {{api}}/productos/4
+
+### 400: ya está CANCELADO
+PATCH {{api}}/pedidos/{{pedidoCancelar}}/cancelar
+
+### Logout
+POST {{api}}/auth/logout
+
+
+### -----------------------------------------------------------------
+### 5. Administración (admin / Admin1234!)
+### -----------------------------------------------------------------
+
+POST {{api}}/auth/token
+Content-Type: application/x-www-form-urlencoded
+
+username=admin&password=Admin1234!
+
+### 200: todos los pedidos; filtro por estado
+GET {{api}}/pedidos?estado=PENDIENTE
+
+### 403: el admin no puede usar /cancelar en un pedido ajeno (usa /estado)
+PATCH {{api}}/pedidos/{{pedidoId}}/cancelar
+
+### 200: PENDIENTE -> EN_PREPARACION
+PATCH {{api}}/pedidos/{{pedidoId}}/estado
+Content-Type: application/json
+
+{
+  "estado": "EN_PREPARACION"
+}
+
+### 400: transición inválida (EN_PREPARACION -> PENDIENTE)
+PATCH {{api}}/pedidos/{{pedidoId}}/estado
+Content-Type: application/json
+
+{
+  "estado": "PENDIENTE"
+}
+
+### 200: EN_PREPARACION -> ENTREGADO
+PATCH {{api}}/pedidos/{{pedidoId}}/estado
+Content-Type: application/json
+
+{
+  "estado": "ENTREGADO"
+}
+
+### 400: ENTREGADO es terminal
+PATCH {{api}}/pedidos/{{pedidoId}}/estado
+Content-Type: application/json
+
+{
+  "estado": "CANCELADO"
+}
+
+### 422: estado que no existe
+PATCH {{api}}/pedidos/{{pedidoId}}/estado
+Content-Type: application/json
+
+{
+  "estado": "VOLANDO"
+}
+
+### 200: resumen del panel
+GET {{api}}/pedidos/resumen
+
+
+### --- Categorías ---
+
+# @name categoria
+POST {{api}}/categorias
+Content-Type: application/json
+
+{
+  "nombre": "Empanadas {{$timestamp}}",
+  "descripcion": "Al horno y fritas"
+}
+
+###
+@categoriaId = {{categoria.response.body.id}}
+
+### 409: nombre duplicado
+POST {{api}}/categorias
+Content-Type: application/json
+
+{
+  "nombre": "Pizzas"
+}
+
+### 422: nombre de 1 carácter
+POST {{api}}/categorias
+Content-Type: application/json
+
+{
+  "nombre": "A"
+}
+
+### 200: actualización parcial (solo descripción)
+PUT {{api}}/categorias/{{categoriaId}}
+Content-Type: application/json
+
+{
+  "descripcion": "Solo al horno"
+}
+
+
+### --- Productos ---
+
+# @name producto
+POST {{api}}/productos
+Content-Type: application/json
+
+{
+  "categoria_id": {{categoriaId}},
+  "nombre": "Empanada de carne",
+  "descripcion": "Cortada a cuchillo",
+  "precio_base": 1500,
+  "stock": 48
+}
+
+###
+@productoId = {{producto.response.body.id}}
+
+### 404: categoría inexistente
+POST {{api}}/productos
+Content-Type: application/json
+
+{
+  "categoria_id": 9999,
+  "nombre": "Sin categoría",
+  "precio_base": 100
+}
+
+### 422: precio negativo
+POST {{api}}/productos
+Content-Type: application/json
+
+{
+  "categoria_id": {{categoriaId}},
+  "nombre": "Precio negativo",
+  "precio_base": -1
+}
+
+### 200: actualización parcial (solo precio)
+PUT {{api}}/productos/{{productoId}}
+Content-Type: application/json
+
+{
+  "precio_base": 1650
+}
+
+### 200: cambio de stock y disponibilidad
+PATCH {{api}}/productos/{{productoId}}/stock
+Content-Type: application/json
+
+{
+  "stock": 10,
+  "disponible": false
+}
+
+### 204: baja lógica del producto
+DELETE {{api}}/productos/{{productoId}}
+
+### 404: un producto dado de baja se trata como inexistente
+GET {{api}}/productos/{{productoId}}
+
+### 204: baja lógica de la categoría
+DELETE {{api}}/categorias/{{categoriaId}}
+
+### 404: ya no se puede modificar
+PUT {{api}}/categorias/{{categoriaId}}
+Content-Type: application/json
+
+{
+  "descripcion": "x"
+}
+
+
+### --- Usuarios ---
+
+### 200: listado
+GET {{api}}/admin/usuarios
+
+### 200: desactivar al cliente (idempotente)
+POST {{api}}/admin/usuarios/{{clienteId}}/desactivar
+
+### 400: el admin no puede desactivarse a sí mismo
+POST {{api}}/admin/usuarios/1/desactivar
+
+### 404: usuario inexistente
+POST {{api}}/admin/usuarios/9999/activar
+
+### 400 "Cuenta de usuario desactivada" en el login del cliente
+POST {{api}}/auth/token
+Content-Type: application/x-www-form-urlencoded
+
+username={{username}}&password={{clave}}
+
+### Volver a entrar como admin y reactivar al cliente
+POST {{api}}/auth/token
+Content-Type: application/x-www-form-urlencoded
+
+username=admin&password=Admin1234!
+
+###
+POST {{api}}/admin/usuarios/{{clienteId}}/activar
+
+###
+POST {{api}}/auth/logout

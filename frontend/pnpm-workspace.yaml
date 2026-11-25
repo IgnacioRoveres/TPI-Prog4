@@ -1,0 +1,3 @@
+# Solo instalar versiones publicadas hace al menos 1 día (protección de supply chain).
+# pnpm 11+ ya lo trae por defecto; con esto el lockfile se genera igual en pnpm 10.
+minimumReleaseAge: 1440
